@@ -1,0 +1,534 @@
+Index: Array.cpp
+===================================================================
+--- Array.cpp	(revision 1105)
++++ Array.cpp	(working copy)
+@@ -534,8 +534,9 @@
+     }
+     
+     Value propA, propB;
++    QName qname( name, NULL );
+     
+-    if( !objectA->resolveProperty( name, &propA ) || !objectB->resolveProperty( name, &propB ) ) {
++    if( !objectA->resolveProperty( &qname, &propA ) || !objectB->resolveProperty( &qname, &propB ) ) {
+         return 0;
+     }
+     
+Index: Domain.cpp
+===================================================================
+--- Domain.cpp	(revision 1105)
++++ Domain.cpp	(working copy)
+@@ -90,7 +90,7 @@
+         return NULL;
+     }
+ 
+-    m_global->setProperty( name->qualifiedName(), cls );
++    m_global->setProperty( name, cls );
+     return cls;
+ }
+ 
+@@ -254,11 +254,11 @@
+         Class* cls = registerClass( TypeObject, "URIError", "Error", ErrorClosure::newOp );
+     }
+ 
+-    m_global->setProperty( "undefined", Value::undefined );
+-    m_global->setProperty( "NaN", Value::NaN() );
+-    m_global->setProperty( "Infinity", Value::Infinity() );
+-    m_global->setProperty( "trace", NativeClosure( as_global_trace, 0 ) );
+-    m_global->setProperty( "print", NativeClosure( as_global_trace, 0 ) );
++    m_global->setProperty( internQName( "undefined" ), Value::undefined );
++    m_global->setProperty( internQName( "NaN" ), Value::NaN() );
++    m_global->setProperty( internQName( "Infinity" ), Value::Infinity() );
++    m_global->setProperty( internQName( "trace" ), NativeClosure( as_global_trace, 0 ) );
++    m_global->setProperty( internQName( "print" ), NativeClosure( as_global_trace, 0 ) );
+ #endif
+ }
+ 
+@@ -270,8 +270,9 @@
+     }
+     
+     Value value;
++    QName *qname = new QName( name, NULL );
+ 
+-    if( m_global->resolveProperty( name, &value ) ) {
++    if( m_global->resolveProperty( qname, &value ) ) {
+         return cast_to<Class>( value.asObject() );
+     }
+ 
+@@ -299,7 +300,7 @@
+ // ** Domain::internQName
+ QName* Domain::internQName( const Str& name, const Str& ns )
+ {
+-    QName* qname = new QName( name, new Namespace( Namespace::Package, ns ) );
++    QName* qname = new QName( name, new Namespace( Namespace::Public, ns ) );
+     m_nameCache.push_back( qname );
+ 
+     return qname;
+Index: Domain.h
+===================================================================
+--- Domain.h	(revision 1105)
++++ Domain.h	(working copy)
+@@ -42,7 +42,7 @@
+         Class*              registerClass( const QName* name, Class* cls );
+         Class*              findClass( const Str& name, bool initialize = true ) const;
+         QName*              findQName( const Str& name, const Str& ns ) const;
+-        QName*              internQName( const Str& name, const Str& ns );
++        QName*              internQName( const Str& name, const Str& ns = "" );
+ 
+     protected:
+ 
+Index: Dump.cpp
+===================================================================
+--- Dump.cpp	(revision 1105)
++++ Dump.cpp	(working copy)
+@@ -19,9 +19,9 @@
+ const char* Dump::formatNamespaceKind( int kind )
+ {
+     switch( kind ) {
+-        case NamespaceInfo::Namespace:             return "namespace";
+-        case NamespaceInfo::PackageNamespace:      return "package";
+-        case NamespaceInfo::PackageInternalNs:     return "internal";
++        case NamespaceInfo::Namespace:             return "public";
++        case NamespaceInfo::PackageNamespace:      return "public";
++        case NamespaceInfo::PackageInternalNs:     return "packageInternal";
+         case NamespaceInfo::ProtectedNamespace:    return "protected";
+         case NamespaceInfo::ExplicitNamespace:     return "explicit";
+         case NamespaceInfo::StaticProtectedNs:     return "staticProtected";
+Index: Linker.cpp
+===================================================================
+--- Linker.cpp	(revision 1105)
++++ Linker.cpp	(working copy)
+@@ -391,8 +391,8 @@
+ Namespace::Kind Linker::namespaceKind( NamespaceInfo::Kind kind )
+ {
+     switch( kind ) {
+-    case NamespaceInfo::Namespace:          return Namespace::Ns;
+-    case NamespaceInfo::PackageNamespace:   return Namespace::Package;
++    case NamespaceInfo::Namespace:
++    case NamespaceInfo::PackageNamespace:   return Namespace::Public;
+     case NamespaceInfo::PackageInternalNs:  return Namespace::PackageInternal;
+     case NamespaceInfo::ProtectedNamespace: return Namespace::Protected;
+     case NamespaceInfo::ExplicitNamespace:  return Namespace::Explicit;
+@@ -402,7 +402,7 @@
+     }
+ 
+     assert(false);
+-    return Namespace::Ns;
++    return Namespace::Undefined;
+ }
+ 
+ // ** Linker::resolveClass
+@@ -421,9 +421,9 @@
+     const QName* qname = name->isQName();
+     assert( qname );
+ 
+-    Class* cls = m_domain->findClass( qname->qualifiedName(), false );
++    Class* cls = m_domain->findClass( qname->name(), false );
+     if( !cls ) {
+-        AVM2_VERBOSE( "Linker::resolveClass : unresolved class %s\n", qname->qualifiedName().c_str() );
++        AVM2_VERBOSE( "Linker::resolveClass : unresolved class %s\n", qname->name().c_str() );
+     }
+ 
+     return cls;
+Index: Multiname.cpp
+===================================================================
+--- Multiname.cpp	(revision 1105)
++++ Multiname.cpp	(working copy)
+@@ -45,6 +45,22 @@
+     return n;
+ }
+ 
++// ** Namespace::equalTo
++bool Namespace::equalTo( const Namespace* other ) const
++{
++    if( m_kind != other->m_kind ) {
++        return false;
++    }
++
++    switch( other->m_kind ) {
++    case Protected: return true;
++    case Private:   return other == this;
++    default:        break;
++    }
++
++    return m_name == other->m_name;
++}
++
+ // ** Namespace::kind
+ Namespace::Kind Namespace::kind( void ) const
+ {
+@@ -59,6 +75,11 @@
+ 
+ }
+ 
++Name::~Name( void )
++{
++    printf( "" );
++}
++
+ // ** Name::name
+ const Str& Name::name( void ) const
+ {
+@@ -157,14 +178,14 @@
+ }
+ 
+ // ** QName::qualifiedName
+-Str QName::qualifiedName( void ) const
+-{
+-    assert( m_namespace );
++//Str QName::qualifiedName( void ) const
++//{
++//    assert( m_namespace );
++//
++//    const Str& ns = m_namespace->uri();
++//    return ns == "" ? m_name : ns + "." + m_name;
++//}
+ 
+-    const Str& ns = m_namespace->uri();
+-    return ns == "" ? m_name : ns + "." + m_name;
+-}
+-
+ // ** QName::isQName
+ const QName* QName::isQName( void ) const
+ {
+@@ -198,21 +219,21 @@
+ }
+ 
+ // ** Multiname::count
+-int Multiname::count( void ) const
+-{
+-    return ( int )m_namespaces.size();
+-}
++//int Multiname::count( void ) const
++//{
++//    return ( int )m_namespaces.size();
++//}
+ 
+ // ** Multiname::qualifiedName
+-Str Multiname::qualifiedName( int index ) const
+-{
+-    assert( index >= 0 && index < count() );
+-    const Namespace* ns  = m_namespaces[index];
+-    const Str&       uri = ns->uri();
++//Str Multiname::qualifiedName( int index ) const
++//{
++//    assert( index >= 0 && index < count() );
++//    const Namespace* ns  = m_namespaces[index];
++//    const Str&       uri = ns->uri();
++//
++//    return uri == "" ? m_name : uri + "." + m_name;
++//}
+ 
+-    return uri == "" ? m_name : uri + "." + m_name;
+-}
+-
+ // -------------------------------------------------- MultinameLate ------------------------------------------------ //
+ 
+ // ** MultinameL::MultinameL
+Index: Multiname.h
+===================================================================
+--- Multiname.h	(revision 1105)
++++ Multiname.h	(working copy)
+@@ -22,12 +22,14 @@
+ 
+         // enum Kind
+         enum Kind {
+-            Ns,
+-			Package,
+-			PackageInternal,
++        //    Ns,
++		//	Package,
++            Undefined,
++            Public,
+             Private,
+ 			Protected,
+             StaticProtected,
++            PackageInternal,
+ 			Explicit
+         };
+ 
+@@ -37,6 +39,8 @@
+         Str             uri( void ) const;
+         Kind            kind( void ) const;
+ 
++        bool            equalTo( const Namespace* other ) const;
++
+     private:
+ 
+         Str             m_name;
+@@ -48,6 +52,7 @@
+     public:
+ 
+                                     Name( const Str& name );
++        virtual                     ~Name( void );
+ 
+         const Str&                  name( void ) const;
+         void                        setName( const Str& value );
+@@ -74,7 +79,7 @@
+         virtual const QName*        isQName( void ) const;
+ 
+         // ** QName
+-        Str                         qualifiedName( void ) const;
++    //    Str                         qualifiedName( void ) const;
+         const Namespace*            ns( void ) const;
+ 
+     protected:
+@@ -120,8 +125,8 @@
+ 
+         // ** Multiname
+         const Namespaces&           namespaces( void ) const;
+-        int                         count( void ) const;
+-        Str                         qualifiedName( int index ) const;
++    //    int                         count( void ) const;
++    //    Str                         qualifiedName( int index ) const;
+ 
+     private:
+ 
+Index: Object.cpp
+===================================================================
+--- Object.cpp	(revision 1105)
++++ Object.cpp	(working copy)
+@@ -70,7 +70,7 @@
+ 
+     return true;
+ }
+-
++/*
+ // ** Object::resolveProperty
+ bool Object::resolveProperty( const Str& name, Value* value ) const
+ {
+@@ -87,24 +87,23 @@
+ 
+     return const_cast<Object*>( this )->get_member( name, value );
+ }
++*/
+ 
+ // ** Object::resolveProperty
+ bool Object::resolveProperty( const Name* name, Value* value ) const
+ {
+-    if( const Multiname* mname = name->isMultiname() ) {
+-        for( int i = 0, n = mname->count(); i < n; i++ ) {
+-            if( resolveProperty( mname->qualifiedName( i ), value ) ) {
+-                return true;
+-            }
++    if( m_traits != NULL ) {
++        int idx = m_traits->findTrait( name );
++
++        if( idx != -1 ) {
++            if( value ) *value = slot( idx );
++            return true;
+         }
+     }
+-    else {
+-        return resolveProperty( name->isQName()->qualifiedName(), value );
+-    }
+ 
+-    return false;
++    return const_cast<Object*>( this )->get_member( name->name(), value );
+ }
+-
++/*
+ // ** Object::setProperty
+ bool Object::setProperty( const Str& name, const Value& value )
+ {
+@@ -127,21 +126,24 @@
+ 
+     return set_member( name, value );
+ }
+-
++*/
+ // ** Object::setProperty
+ bool Object::setProperty( const Name* name, const Value& value )
+ {
+-    if( const Multiname* mname = name->isMultiname() ) {
+-        for( int i = 0, n = mname->count(); i < n; i++ ) {
+-            if( setProperty( mname->qualifiedName( i ), value ) ) {
+-                return true;
+-            }
++    if( m_traits != NULL ) {
++        int idx = m_traits->findTrait( name );
++
++        if( idx != -1 ) {
++            setSlot( idx, value );
++            return true;
+         }
+-    } else {
+-        return setProperty( name->isQName()->qualifiedName(), value );
+     }
+ 
+-    return false;
++    if( m_class != NULL && m_class->isSealed() ) {
++        return false;
++    }
++
++    return set_member( name->name(), value );
+ }
+ 
+ // ** Object::getMember
+@@ -194,8 +196,9 @@
+ Value Object::valueOf( void ) const
+ {
+     Value function;
++    QName name( "valueOf", NULL );
+ 
+-    if( resolveProperty( "valueOf", &function ) ) {
++    if( resolveProperty( &name, &function ) ) {
+         return function.asFunction()->call( this );
+     }
+ 
+@@ -206,9 +209,11 @@
+ const char* Object::to_string( void )
+ {
+     Value toString;
++    QName* name = new QName( "toString", NULL );
++
+     static char str[64];
+ 
+-    if( resolveProperty( "toString", &toString ) && toString.isFunction() && !m_isInsideToString ) {
++    if( resolveProperty( name, &toString ) && toString.isFunction() && !m_isInsideToString ) {
+         m_isInsideToString = true;
+         Value result = toString.asFunction()->call( this );
+         m_isInsideToString = false;
+@@ -290,7 +295,8 @@
+ // ** Object::hasOwnProperty
+ bool Object::hasOwnProperty( const Str& name ) const
+ {
+-    return resolveProperty( name, NULL );
++    QName qname( name, NULL );
++    return resolveProperty( &qname, NULL );
+ }
+ 
+ // ** Object::clearReft
+Index: Object.h
+===================================================================
+--- Object.h	(revision 1105)
++++ Object.h	(working copy)
+@@ -87,11 +87,11 @@
+ 		//! Returns true if this Object has a public property with a given name.
+         bool                        hasOwnProperty( const Str& name ) const;
+ 		//! Resolves a property inside this object by a given name and access scope.
+-        bool                        resolveProperty( const Str& name, Value* value ) const;
++    //    bool                        resolveProperty( const Str& name, Value* value ) const;
+ 		//! Resolves a property inside this object by a given multiname and access scope.
+         bool                        resolveProperty( const Name* name, Value* value ) const;
+ 		//! Sets a property inside this object with a given name and access scope.
+-        bool                        setProperty( const Str& name, const Value& value );
++    //    bool                        setProperty( const Str& name, const Value& value );
+         //! Sets a property inside this object with a given name and access scope.
+         bool                        setProperty( const Name* name, const Value& value );
+         //! Creates a new iterator instance by a given property key.
+Index: Trait.cpp
+===================================================================
+--- Trait.cpp	(revision 1105)
++++ Trait.cpp	(working copy)
+@@ -24,6 +24,8 @@
+ 
+     const Namespace* ns     = name->ns();
+ 
++    printf( "addTrait %s %s\n", name->name().c_str(), ns->uri().c_str() );
++
+     if( type == Setter || type == Getter ) {
+         addProperty( owner, name, value, type, slot, attr );
+         return;
+@@ -40,7 +42,7 @@
+         function->setName( owner + "/" + name->name() + "()" );
+     }
+ 
+-    m_traits.set( name->qualifiedName(), trait );
++    m_traits.set( name->name(), trait );
+ }
+ 
+ // ** Traits::mergeTraits
+@@ -51,7 +53,8 @@
+     }
+     
+     for( TraitRegistry::const_iterator i = traits->m_traits.begin(), end = traits->m_traits.end(); i != end; ++i ) {
+-        m_traits.set( ns + "." + i->second.m_name->name(), i->second );
++        m_traits.set( i->second.m_name->name(), i->second );
++    //    m_traits.set( ns + "." + i->second.m_name->name(), i->second );
+     }
+ }
+ 
+@@ -82,7 +85,8 @@
+         trait.m_type   = type;
+         trait.m_slot   = slot;
+         trait.m_attr   = attr;
+-        m_traits.set( name->qualifiedName(), trait );
++        trait.m_name   = name;
++        m_traits.set( name->name(), trait );
+     }
+ 
+     switch( type ) {
+@@ -203,6 +207,50 @@
+     return true;
+ }
+ 
++// ** Traits::findTrait
++int Traits::findTrait( const Str& name, const Namespace* ns ) const
++{
++    Trait trait;
++
++    // ** Find trait by name
++    if( m_traits.get( name, &trait ) == false ) {
++        return m_super != NULL ? m_super->findTrait( name, ns ) : -1;
++    }
++
++    assert( trait.m_name != NULL );
++
++    if( ns == NULL ) {  // !!!: workaround
++        return trait.m_name->ns()->kind() == Namespace::Public ? trait.m_slot : -1;
++    }
++
++    return ns->equalTo( trait.m_name->ns() ) ? trait.m_slot : -1;
++}
++
++// ** Traits::findTrait
++int Traits::findTrait( const Name* name ) const
++{
++    // ** Qualified name
++    if( const QName* qname = name->isQName() ) {
++        return findTrait( qname->name(), qname->ns() );
++    }
++
++    // ** Multiname
++    const Multiname* mname = name->isMultiname();
++    assert( mname );
++
++    const Namespaces& namespaces = mname->namespaces();
++
++    for( int i = 0, n = ( int )namespaces.size(); i < n; i++ ) {
++        int slot = findTrait( mname->name(), namespaces[i].get() );
++
++        if( slot != -1 ) {
++            return slot;
++        }
++    }
++
++    return -1;
++}
++
+ // ** Traits::resolveSlot
+ bool Traits::resolveSlot( const Str& name, TraitAccess access, int& slot ) const
+ {
+Index: Trait.h
+===================================================================
+--- Trait.h	(revision 1105)
++++ Trait.h	(working copy)
+@@ -38,7 +38,7 @@
+ 
+         // ** struct Trait
+         struct Trait {
+-            const QName*    m_name;
++            QNameWeakConst  m_name;
+             Value           m_value;
+             Type            m_type;
+             int             m_slot;
+@@ -47,6 +47,9 @@
+ 
+     public:
+ 
++        int             findTrait( const Name* name ) const;
++        int             findTrait( const Str& name, const Namespace* ns ) const;
++
+         void            addTrait( const Str& owner, const QName* name, const ::gameswf::Class* valueType, const Value& value, Type type, int slot, Uint8 attr );
+         void            assignSlots( void );
+         void            setSuper( Traits* value );
